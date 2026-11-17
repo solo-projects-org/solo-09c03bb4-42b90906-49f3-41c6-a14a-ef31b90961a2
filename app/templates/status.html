@@ -7,6 +7,7 @@
   <p>
     已接纳读数：<b>{{ st.points.accepted }}</b> / {{ st.points.max }}
     　待校时读数：<b>{{ st.pending_count }}</b>
+    　隔离点（当前版）：<b>{{ st.isolated_count }}</b>
   </p>
   <p>
     重算状态：
@@ -44,6 +45,27 @@
 </table>
 {% else %}
 <p class="hint">尚未录入锚点。请先到「校时锚点」页为各段录入两枚锚点。</p>
+{% endif %}
+
+<h3>故障隔离</h3>
+{% if st.isolations %}
+<table>
+  <tr><th>段号</th><th>本地秒区间（闭）</th><th>原因</th><th>状态</th><th>版本</th>
+      <th>命中原始点</th><th></th></tr>
+  {% for i in st.isolations %}
+  <tr>
+    <td>{{ i.segment }}</td>
+    <td class="mono">[{{ i.local_start }}, {{ i.local_end }}]</td>
+    <td>{{ i.reason }}</td>
+    <td>{% if i.active %}<span class="err">隔离中</span>{% else %}<span class="ok">已解除</span>{% endif %}</td>
+    <td>v{{ i.version }}</td>
+    <td>{{ i.point_count }}</td>
+    <td><a href="/isolations?segment={{ i.segment }}">{% if i.active %}更正 / 解除{% else %}重新登记{% endif %}</a></td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}
+<p class="hint">尚无隔离记录。</p>
 {% endif %}
 
 <h3>上传批次</h3>

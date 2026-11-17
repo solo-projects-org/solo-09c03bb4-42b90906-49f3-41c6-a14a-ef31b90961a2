@@ -19,6 +19,10 @@
 {% if result %}
 <h3>{{ result.date }}（UTC）已校时读数：{{ result.count }} 条
     <span class="hint">（校时版本 v{{ result.calc_version }}）</span></h3>
+{% if not result.deliverable %}
+<div class="msg err"><b>此结果不可交付</b>：有隔离/锚点/上传变更尚未完成换版，
+当前显示的是上一完整版本 v{{ result.calc_version }}，仅供回看。待重算完成后刷新本页。</div>
+{% endif %}
 {% if result.readings %}
 <table>
   <tr><th>批次号</th><th>原行号</th><th>段号</th><th>本地秒数</th><th>温度</th>
@@ -35,6 +39,22 @@
 {% else %}
 <p class="hint">该日无已校时读数。</p>
 {% endif %}
+{% endif %}
+
+{% if result.isolated_count %}
+<h3>隔离点明细（{{ result.isolated_count }} 条，不进入可交付供数）</h3>
+<p class="hint">这些点因探头故障被隔离，保留批次号、原行号与原因供追溯；「校时版本」与本页可交付读数同版。</p>
+<table>
+  <tr><th>批次号</th><th>原行号</th><th>段号</th><th>本地秒数</th><th>温度</th>
+      <th>原因</th><th>隔离版本</th><th>校时版本</th></tr>
+  {% for p in result.isolated %}
+  <tr>
+    <td>{{ p.batch_id }}</td><td>{{ p.row_no }}</td><td>{{ p.segment }}</td>
+    <td class="mono">{{ p.local_seconds }}</td><td>{{ p.temperature }}</td>
+    <td>{{ p.reason }}</td><td>v{{ p.isolation_version }}</td><td>v{{ p.calc_version }}</td>
+  </tr>
+  {% endfor %}
+</table>
 {% endif %}
 
 <h3>待校时读数（{{ pending_count }} 条）</h3>

@@ -56,6 +56,27 @@ CREATE TABLE IF NOT EXISTS calibrated (
 );
 CREATE INDEX IF NOT EXISTS idx_calibrated_date ON calibrated(utc_date);
 
+-- 每段最多一条隔离记录；active=0 表示已解除（记录保留供追溯）。
+-- 更正与解除都必须提交所见版本（乐观并发），版本冲突不修改原决定。
+CREATE TABLE IF NOT EXISTS isolations (
+    segment     INTEGER PRIMARY KEY,
+    local_start INTEGER NOT NULL,            -- 本地秒数闭区间起点
+    local_end   INTEGER NOT NULL,            -- 本地秒数闭区间终点
+    reason      TEXT NOT NULL,
+    version     INTEGER NOT NULL,
+    active      INTEGER NOT NULL DEFAULT 1,
+    updated_at  TEXT NOT NULL
+);
+
+-- 当前校时版本内的隔离明细，与 calibrated 在同一事务内整体换版。
+CREATE TABLE IF NOT EXISTS isolated_points (
+    reading_id        INTEGER PRIMARY KEY REFERENCES readings(id),
+    reason            TEXT NOT NULL,
+    isolation_version INTEGER NOT NULL,
+    calc_version      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_isolated_points_version ON isolated_points(calc_version);
+
 CREATE TABLE IF NOT EXISTS calc_state (
     id         INTEGER PRIMARY KEY CHECK (id = 1),
     version    INTEGER NOT NULL,             -- 校时结果版本号，单调递增

@@ -9,6 +9,9 @@
   新日加入”同时生效；计算或提交失败时旧版本原样保留，绝不提供半版。
 - state_generation 持久化，服务重启后启动线程会比对代次并补算，
   所有已接纳且处于锚点范围的点最终都会进入当前版。
+- 隔离决定是校时输入的一部分：isolations 的变更同样递增 state_generation，
+  并在同一事务内与 calibrated / isolated_points 一起换版。
+  尚未校时的点若落入隔离区间，进入锚点范围后仍沿用隔离决定。
 """
 from __future__ import annotations
 
@@ -27,14 +30,27 @@ class StaleState(Exception):
     """提交时状态代次已变化：本次计算过期，需丢弃重算。"""
 
 
-def compute_calibration(readings, anchors: dict) -> list[dict]:
-    """纯函数：对每枚落在锚点区间内的读数做线性校时。
+def compute_calibration(readings, anchors: dict, isolations: dict | None = None):
+    """纯函数：对每枚落在锚点区间内的读数做线性校时；隔离点不进入校时结果。
 
-    readings: 含 id/segment/local_seconds 的行
-    anchors:  segment -> 含 local1/_ts1/local2/_ts2/version 的 dict
+    readings:   含 id/segment/local_seconds 的行
+    anchors:    segment -> 含 local1/_ts1/local2/_ts2/version 的 dict
+    isolations: segment -> 含 local_start/local_end/reason/version/active 的 dict
+
+    返回 (calibrated_rows, isolated_rows)。隔离优先于校时：
+    无论该点当前是否在锚点范围内，只要落入生效中的隔离区间，就只记入隔离明细。
     """
-    out = []
+    isolations = isolations or {}
+    calibrated, isolated = [], []
     for r in readings:
+        iso = isolations.get(r["segment"])
+        if iso and iso["active"] and iso["local_start"] <= r["local_seconds"] <= iso["local_end"]:
+            isolated.append({
+                "reading_id": r["id"],
+                "reason": iso["reason"],
+                "isolation_version": iso["version"],
+            })
+            continue
         a = anchors.get(r["segment"])
         if a is None:
             continue
@@ -44,17 +60,17 @@ def compute_calibration(readings, anchors: dict) -> list[dict]:
             ts = a["_ts1"] + frac * (a["_ts2"] - a["_ts1"])
             ts = round(ts * 1000) / 1000  # 毫秒精度
             dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-            out.append({
+            calibrated.append({
                 "reading_id": r["id"],
                 "utc_time": fmt_utc(dt),
                 "utc_date": dt.date().isoformat(),
                 "anchor_version": a["version"],
             })
-    return out
+    return calibrated, isolated
 
 
 def load_snapshot(db: Database):
-    """在锁内一次读出 代次 + 全部读数 + 全部锚点，保证快照一致。"""
+    """在锁内一次读出 代次 + 全部读数 + 全部锚点 + 全部隔离记录，保证快照一致。"""
     def fn(conn):
         meta = {r["key"]: r["value"] for r in conn.execute("SELECT key, value FROM meta")}
         state_gen = int(meta.get("state_generation", "0"))
@@ -68,13 +84,18 @@ def load_snapshot(db: Database):
             d["_ts1"] = parse_utc(d["utc1"]).timestamp()
             d["_ts2"] = parse_utc(d["utc2"]).timestamp()
             anchors[d["segment"]] = d
-        return state_gen, calibrated_gen, readings, anchors
+        isolations = {
+            i["segment"]: dict(i) for i in conn.execute("SELECT * FROM isolations").fetchall()
+        }
+        return state_gen, calibrated_gen, readings, anchors, isolations
 
     return db.snapshot(fn)
 
 
-def commit_calc(db: Database, generation: int, rows: list[dict]) -> int:
-    """单事务整体换版。代次不符则抛 StaleState（不提交）。"""
+def commit_calc(db: Database, generation: int, rows: list[dict],
+                isolated: list[dict] | None = None) -> int:
+    """单事务整体换版（校时结果 + 隔离明细一同生效）。代次不符则抛 StaleState（不提交）。"""
+    isolated = isolated or []
     with db.tx() as cur:
         cur_gen = int(
             cur.execute("SELECT value FROM meta WHERE key = 'state_generation'")
@@ -86,12 +107,21 @@ def commit_calc(db: Database, generation: int, rows: list[dict]) -> int:
             "SELECT version FROM calc_state WHERE id = 1"
         ).fetchone()["version"] + 1
         cur.execute("DELETE FROM calibrated")
+        cur.execute("DELETE FROM isolated_points")
         cur.executemany(
             "INSERT INTO calibrated(reading_id, utc_time, utc_date, anchor_version, calc_version)"
             " VALUES (?, ?, ?, ?, ?)",
             [
                 (r["reading_id"], r["utc_time"], r["utc_date"], r["anchor_version"], new_version)
                 for r in rows
+            ],
+        )
+        cur.executemany(
+            "INSERT INTO isolated_points(reading_id, reason, isolation_version, calc_version)"
+            " VALUES (?, ?, ?, ?)",
+            [
+                (r["reading_id"], r["reason"], r["isolation_version"], new_version)
+                for r in isolated
             ],
         )
         cur.execute(
@@ -154,16 +184,16 @@ class RecalcWorker:
     def run_until_quiet(self) -> None:
         """重算直至无待处理变更；失败重试 max_failures 次后保持失败状态等待下次触发。"""
         while not self._stop.is_set():
-            state_gen, calibrated_gen, readings, anchors = load_snapshot(self.db)
+            state_gen, calibrated_gen, readings, anchors, isolations = load_snapshot(self.db)
             if calibrated_gen == state_gen:
                 self._failures = 0
                 return
             set_status(self.db, "running")
             try:
-                rows = compute_calibration(readings, anchors)
+                rows, isolated = compute_calibration(readings, anchors, isolations)
                 if self.delay > 0:
                     time.sleep(self.delay)  # 放大并发窗口（演示/测试）
-                commit_calc(self.db, state_gen, rows)
+                commit_calc(self.db, state_gen, rows, isolated)
                 self._failures = 0
             except StaleState:
                 log.info("状态已变化，丢弃过期计算并重算")

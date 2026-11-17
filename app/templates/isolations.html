@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% block title %}故障隔离 - 冷链记录仪校时平台{% endblock %}
+{% block content %}
+<h2>探头故障隔离</h2>
+
+{% if calc.dirty %}
+<div class="msg err"><b>有变更尚未完成换版</b>：下方「当前隔离明细」仍是上一完整版本
+v{{ calc.version }}，仅供回看；新登记/解除的隔离决定将在重算完成后与校时读数、
+隔离明细一同生效。</div>
+{% endif %}
+
+<div class="card">
+  <p class="hint">
+    每段最多登记一段有效故障区间（本地秒数<b>闭区间</b>，含两端），并填写原因。<br>
+    区间内的原始温度点不会进入可交付的按日供数，但仍保留批次号、原行号和原因供追溯；
+    <b>尚未校时的点日后进入锚点范围时，同样沿用该隔离决定</b>。<br>
+    <b>更正或解除必须提交所见版本</b>（下表链接会自动填入）；版本冲突时保留原决定、不做任何修改。<br>
+    解除后该段原始点在下一次重算换版时恢复供数；隔离明细与校时日期、可交付读数同版本整体生效。
+  </p>
+  <form method="post" action="/isolations">
+    <p><label>开机段号</label>
+       <input type="number" name="segment" min="0" required
+              value="{{ prefill.segment if prefill else '' }}"></p>
+    <p><label>本地秒数起</label>
+       <input type="number" name="local_start" min="0" required
+              value="{{ prefill.local_start if prefill else '' }}">
+       <label>本地秒数止</label>
+       <input type="number" name="local_end" min="0" required
+              value="{{ prefill.local_end if prefill else '' }}">
+       <span class="hint">闭区间，起点 ≤ 终点</span></p>
+    <p><label>隔离原因</label>
+       <input type="text" name="reason" size="60" maxlength="500" required
+              placeholder="如：探头断线，读数恒为 -99"
+              value="{{ prefill.reason if prefill else '' }}"></p>
+    <p><label>所见版本</label>
+       <input type="number" name="version" min="1"
+              value="{{ prefill.version if prefill else '' }}"
+              placeholder="{{ '更正时必填' if prefill else '新建留空' }}">
+       <span class="hint">
+         {% if prefill and prefill.active %}更正须填当前版本 v{{ prefill.version }}
+         {% elif prefill and not prefill.active %}该段隔离已解除（v{{ prefill.version }}）；重新登记须填当前版本 v{{ prefill.version }}
+         {% else %}新建留空{% endif %}
+       </span></p>
+    <p><button type="submit">保存并触发重算</button></p>
+  </form>
+  {% if error %}<div class="msg err">{{ error }}</div>{% endif %}
+</div>
+
+<h3>隔离记录</h3>
+{% if isolations %}
+<table>
+  <tr><th>段号</th><th>本地秒区间（闭）</th><th>原因</th><th>状态</th><th>版本</th>
+      <th>命中原始点</th><th>更新时间</th><th></th></tr>
+  {% for i in isolations %}
+  <tr>
+    <td>{{ i.segment }}</td>
+    <td class="mono">[{{ i.local_start }}, {{ i.local_end }}]</td>
+    <td>{{ i.reason }}</td>
+    <td>{% if i.active %}<span class="err">隔离中</span>{% else %}<span class="ok">已解除</span>{% endif %}</td>
+    <td>v{{ i.version }}</td>
+    <td>{{ i.point_count }}</td>
+    <td class="mono">{{ i.updated_at }}</td>
+    <td>
+      {% if i.active %}
+      <a href="/isolations?segment={{ i.segment }}">更正</a>
+      <form method="post" action="/isolations/clear" style="display:inline"
+            onsubmit="return confirm('确认解除段 {{ i.segment }} 的隔离？');">
+        <input type="hidden" name="segment" value="{{ i.segment }}">
+        <input type="hidden" name="version" value="{{ i.version }}">
+        <button type="submit" style="padding:3px 10px;background:#8a3b3b">解除</button>
+      </form>
+      {% else %}
+      <a href="/isolations?segment={{ i.segment }}">重新登记</a>
+      {% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}
+<p class="hint">尚无隔离记录。</p>
+{% endif %}
+
+<h3>当前隔离明细（校时版本内，{{ isolated|length }} 条）</h3>
+{% if isolated %}
+<p class="hint">这些点不进入任何日期的可交付供数；下表的「校时版本」与按日查询一致。</p>
+<table>
+  <tr><th>批次号</th><th>原行号</th><th>段号</th><th>本地秒数</th><th>温度</th>
+      <th>原因</th><th>隔离版本</th><th>校时版本</th></tr>
+  {% for p in isolated %}
+  <tr>
+    <td>{{ p.batch_id }}</td><td>{{ p.row_no }}</td><td>{{ p.segment }}</td>
+    <td class="mono">{{ p.local_seconds }}</td><td>{{ p.temperature }}</td>
+    <td>{{ p.reason }}</td><td>v{{ p.isolation_version }}</td><td>v{{ p.calc_version }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}
+<p class="hint">当前校时版本中没有隔离点。</p>
+{% endif %}
+{% endblock %}

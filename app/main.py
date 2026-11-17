@@ -155,6 +155,68 @@ def create_app() -> FastAPI:
                       pending=pending[:200], pending_count=len(pending),
                       calc=services.calc_info(db), msg="", ok=1)
 
+    @app.get("/isolations", response_class=HTMLResponse)
+    def isolations_page(request: Request, msg: str = "", ok: int = 1,
+                        segment: int | None = None):
+        isolations = services.list_isolations(db)
+        prefill = None
+        if segment is not None:
+            prefill = next((i for i in isolations if i["segment"] == segment), None)
+        return render(request, "isolations.html", isolations=isolations,
+                      prefill=prefill, isolated=services.isolated_readings(db),
+                      calc=services.calc_info(db), msg=msg, ok=ok)
+
+    @app.post("/isolations", response_class=HTMLResponse)
+    async def isolations_do(request: Request):
+        form = await request.form()
+        try:
+            seg = int(str(form.get("segment", "")).strip())
+            local_start = int(str(form.get("local_start", "")).strip())
+            local_end = int(str(form.get("local_end", "")).strip())
+            v_raw = str(form.get("version", "")).strip()
+            version = int(v_raw) if v_raw else None
+            new_version = services.set_isolation(
+                db, seg, local_start, local_end, str(form.get("reason", "")), version
+            )
+        except ValueError:
+            return render(request, "isolations.html",
+                          isolations=services.list_isolations(db), prefill=None,
+                          isolated=services.isolated_readings(db),
+                          calc=services.calc_info(db),
+                          error="段号与本地秒数须为整数", msg="", ok=1)
+        except ServiceError as exc:
+            return render(request, "isolations.html",
+                          isolations=services.list_isolations(db), prefill=None,
+                          isolated=services.isolated_readings(db),
+                          calc=services.calc_info(db),
+                          error=exc.message, msg="", ok=1)
+        trigger_recalc()
+        return redirect("/isolations", f"段 {seg} 隔离已保存，当前版本 v{new_version}")
+
+    @app.post("/isolations/clear", response_class=HTMLResponse)
+    async def isolations_clear_do(request: Request):
+        form = await request.form()
+        try:
+            seg = int(str(form.get("segment", "")).strip())
+            v_raw = str(form.get("version", "")).strip()
+            version = int(v_raw) if v_raw else None
+            new_version = services.clear_isolation(db, seg, version)
+        except ValueError:
+            return render(request, "isolations.html",
+                          isolations=services.list_isolations(db), prefill=None,
+                          isolated=services.isolated_readings(db),
+                          calc=services.calc_info(db),
+                          error="段号与版本须为整数", msg="", ok=1)
+        except ServiceError as exc:
+            return render(request, "isolations.html",
+                          isolations=services.list_isolations(db), prefill=None,
+                          isolated=services.isolated_readings(db),
+                          calc=services.calc_info(db),
+                          error=exc.message, msg="", ok=1)
+        trigger_recalc()
+        return redirect("/isolations",
+                        f"段 {seg} 隔离已解除（版本 v{new_version}），原始点恢复供数")
+
     # ------------------------------------------------------------ JSON API
 
     @app.get("/api/status")
@@ -214,6 +276,72 @@ def create_app() -> FastAPI:
     def api_pending():
         pend = services.pending_readings(db)
         return {"count": len(pend), "pending": pend}
+
+    @app.get("/api/isolations")
+    def api_isolations():
+        active = [i for i in services.list_isolations(db) if i["active"]]
+        isolated = services.isolated_readings(db)
+        return {
+            "isolations": services.list_isolations(db),
+            "active_count": len(active),
+            "isolated_count": len(isolated),
+            "isolated": isolated,
+        }
+
+    @app.post("/api/isolations")
+    async def api_isolations_set(request: Request):
+        try:
+            body = await request.json()
+        except Exception:
+            return error_json(ServiceError("请求体须为 JSON", code="BAD_JSON"))
+        try:
+            seg = int(body["segment"])
+            local_start = int(body["local_start"])
+            local_end = int(body["local_end"])
+            reason = str(body["reason"])
+        except KeyError as exc:
+            return error_json(ServiceError(f"缺少字段 {exc}", code="MISSING_FIELD"))
+        except (TypeError, ValueError) as exc:
+            return error_json(ServiceError(f"字段格式错误：{exc}", code="BAD_VALUE"))
+        version = body.get("version")
+        if version is not None:
+            try:
+                version = int(version)
+            except (TypeError, ValueError):
+                return error_json(ServiceError("version 须为整数", code="BAD_VALUE"))
+        try:
+            new_version = services.set_isolation(
+                db, seg, local_start, local_end, reason, version
+            )
+        except ServiceError as exc:
+            return error_json(exc)
+        trigger_recalc()
+        return {"segment": seg, "version": new_version}
+
+    @app.post("/api/isolations/clear")
+    async def api_isolations_clear(request: Request):
+        try:
+            body = await request.json()
+        except Exception:
+            return error_json(ServiceError("请求体须为 JSON", code="BAD_JSON"))
+        try:
+            seg = int(body["segment"])
+        except KeyError as exc:
+            return error_json(ServiceError(f"缺少字段 {exc}", code="MISSING_FIELD"))
+        except (TypeError, ValueError) as exc:
+            return error_json(ServiceError(f"字段格式错误：{exc}", code="BAD_VALUE"))
+        version = body.get("version")
+        if version is not None:
+            try:
+                version = int(version)
+            except (TypeError, ValueError):
+                return error_json(ServiceError("version 须为整数", code="BAD_VALUE"))
+        try:
+            new_version = services.clear_isolation(db, seg, version)
+        except ServiceError as exc:
+            return error_json(exc)
+        trigger_recalc()
+        return {"segment": seg, "version": new_version, "active": False}
 
     return app
 
